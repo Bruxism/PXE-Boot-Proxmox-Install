@@ -1,0 +1,177 @@
+Needs: preseed.cfg / proxmoxinstall.sh
+  Should already have pxe-boot set up. I'm working on the iPXE part.
+
+Change
+  preseed.cfg
+    d-i partman-auto/disk string  (if necessary)
+  autoexec.ipxe
+    
+  ___
+Limitations: Does not do OpenZFS setup
+
+
+
+git clone iPXE
+	`git clone https://github.com/ipxe/ipxe.git`
+compile iPXE
+  `make ipxe/bin-x86_64-efi/snponly.efi EMBED=autoboot.ipxe -j "$(nproc)"`
+	
+
+OpenWRT
+	OpenWRT's default DHCP service, dnsmasq, handles the DHCP, TFTP, and optionally, the DNS part
+	OpenWRT includes uHTTPd for its WebGUI, and a desperate instance is used to host the files for transfer
+	  tftp can technically handle it, especially on wired, and it's infamously slow
+			I say 'especially on wired' because it fails often as it has no error checking
+
+  DHCP, TFTP, HTTP configs:
+		`/etc/config/dhcp`
+			config dnsmasq
+				option enable_tftp '1'
+				option tftp_root '/srv/tftp'
+				option dhcp_boot 'snponly.efi'
+		
+			config boot
+				option filename 'snponly.efi'
+				option servername 'PXE'
+				option serveraddress '10.10.0.1'
+				option networkid 'efi-x64'
+				list dhcp_option '128,http://pxe.internal:8000/autoexec.ipxe'
+		
+			config boot
+				option servername 'PXE'
+				option serveraddress '10.10.0.1'
+				option filename 'pxelinux.0'
+				option networkid 'pxe'
+		
+			config match
+				option networkid 'efi-x64'
+				option match '60,PXEClient:Arch:00007'
+		
+			config host
+				option name 'pxe'
+				option dns '1'
+				option ip '10.10.0.1'
+		
+		`/etc/config/uhttpd`
+			config uhttpd 'pxe'
+				option home '/srv/tftp'
+				option rfc1918_filter '1'
+				option max_requests '3'
+				option max_connections '100'
+				option listen_http '10.10.0.1:8000'
+				option no_symmlinks '1'
+				option no_dirlists '1'
+
+
+
+Get Debian netboot
+	Place the following files into `/srv/tftp/`:
+	https://deb.debian.org/debian/dists/trixie/main/installer-amd64/current/images/netboot/debian-installer/amd64/
+		`linux`
+		`initrd.gz`
+
+Configure/customize `autoexec.ipxe` as needed
+	This doesn't quite use bash syntax, but it does have variables that we set with `set` `{var_name}`
+	`imgfree` is critical for some systems
+		Always leave it at the top
+		I don't fully understand the reasoning
+			Something to do with residual instructions from the initial boot from the compiled ipxe and/or running out of memory from that
+		My PowerEdge R730xd boot fine without it, but I suspect that its firmware was programmed to error correct
+		My Lenovo M70q ThinkCentre, on the other hand, could not, and it would boot loop without it
+			I solved this issue for myself by inspecting the netboot.xyz scripts
+				There is however, a blog post of someone else going through a similar journey that I found afterward when trying to learn why this worked the way it did
+	`set base-ip` to your pxe-boot server
+	`set base-url` to your http server
+
+	Linux Kernel boot parameters--order matters:
+		`kernel `
+			Note the space after `kernel` as it does not use an `=` sign
+			I used uHTTPd to host the larger files such as files: `kernel` and `initrd.gz`
+				In general, it's better to move file transfers to http and away from tftp as early as possible
+		`netcfg/disable_autoconfig=true`
+			This enables the following network configurations
+		`netcfg/get_ipaddress=`
+			The IP that you want your Proxmox to be
+		`netcfg/get_netmask=`
+			The netmask to the IP you had set
+		`netcfg/get_gateway=`
+			The router for the IP you had set
+		`netcfg/get_nameservers=`
+			The DNS server that you prefer
+		`netcfg/confirm_static=`
+			Sets IP to static
+			This will be necessary for Proxmox as it requires a static address (or at least is real fickle about using DHCP)
+		`auto=true`
+			I can't certainly recall why this is needed if at all
+		`netcfg/link_wait_timeout=10`
+			This was needed because my ThinkCentre system would delay getting network connectivity--despite already having booted via the network--in such a way that the preseed file would be read as not having been found
+			This delay gives time for the network to become active with these IP settings before trying to download the `preeseed.cfg` file
+		`url=`
+			The location of `preseed.cfg`
+		`priority=critical`
+			Automates much settings that may likely be trivial for most all users
+		`preseed/interactive=false`
+			Automates the this netboot installation
+		`hostname=`
+			Hostname of your target system
+		`domain=`
+			Domain of the network/target system
+
+Configure/customize `preseed.cfg` as needed
+	`d-i passwd/root-password-crypted password`
+		Set your password here as instructed in the `preseed.cfg` comments
+	`d-i partman-auto/method string`
+		Partition type (Default: lvm)
+	`d-i partman-auto-lvm/new_vg_name`
+		LVM VG name (Default: vg-${HOSTNAME})
+	
+	Related Links:
+		https://www.debian.org/releases/stable/example-preseed.txt
+		https://preseed.debian.net/debian-preseed/trixie/amd64-main-full.txt
+
+After Proxmox boots:
+	Login with the password you supplied in the `preseed.cfg` file; look to the left and click the hostname you set that is listed under `Datacenter`; then look under `System` for `Network`
+		There, carefully make the following changes as making a mistake can lock you out of network access, and then you may have to physically access the system's terminal; do not hit apply until you have completed all of the changes
+			Remove IP/Gateway from interface, and remember the name of the interface
+				Leave it as active with `Autostart` enabled
+			Click create and create virtual switch
+				I'm currently using Linux Bridge on a test bench, but OVS Bridge may be superior
+				Set the IP and Gateway, turn on `Autostart`, and very importantly, set `Bridge Ports` to the name of the remembered interface of the preceding instruction
+				You may want to use `VLAN aware` if you're going to be setting up different services on different 'broadcast domains'/VLANs
+			Carefully review changes to avoid being locked out, and click `Apply Configuration` when ready
+			You should be able to refresh the page after a second or two
+				If you cannot access the page, something went wrong, and you'll likely have to physically access its terminal and make changes to `/etc/network/interfaces`
+					See for more help: https://pve.proxmox.com/wiki/Network_Configuration
+	You may want to enable the `pve-no-subscription` repo under `Updates` > `Repositories` if you don't have a paid subscription to updates
+
+At this point, you're all set!
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

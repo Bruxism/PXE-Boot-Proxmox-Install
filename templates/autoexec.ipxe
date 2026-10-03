@@ -1,0 +1,22 @@
+#!ipxe
+
+imgfree
+
+dhcp
+
+set base-ip ${HTTP_IP}
+set base-port ${HTTP_PORT}
+set base-url http://${base-ip}:${base-port}
+set dns ${HOST_DNS}
+set hostname ${HOSTNAME}
+set domain ${HOST_DOMAIN}
+set host-ip ${HOST_IP}
+set host-netmask ${HOST_NETMASK}
+set host-gateway ${HOST_GATEWAY}
+
+kernel ${base-url}/linux netcfg/disable_autoconfig=true netcfg/get_ipaddress=${host-ip} netcfg/get_netmask=${host-netmask}
+netcfg/get_gateway=${host-gateway} netcfg/get_nameservers=${dns} netcfg/confirm_static=true auto=true netcfg/link_wait_timeout=10 url=${base-url}/preseed.cfg priority=critical preseed/interactive=false hostname=${hostname} domain=${domain}
+
+initrd ${base-url}/initrd.gz
+
+boot
